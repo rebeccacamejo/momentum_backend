@@ -1,9 +1,69 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, EmailStr
 from typing import Any, Dict, List, Optional
+from enum import Enum
 
 # ---------------------------------------------------------------------------
 # Pydantic models
 # ---------------------------------------------------------------------------
+
+class UserRole(str, Enum):
+    OWNER = "owner"
+    ADMIN = "admin"
+    MEMBER = "member"
+    VIEWER = "viewer"
+
+class MagicLinkRequest(BaseModel):
+    email: EmailStr
+    redirect_to: Optional[str] = None
+
+class AuthResponse(BaseModel):
+    access_token: str
+    refresh_token: str
+    user: Dict[str, Any]
+    expires_in: int
+
+class UserProfile(BaseModel):
+    id: str
+    email: str
+    name: Optional[str] = None
+    avatar_url: Optional[str] = None
+    created_at: str
+    updated_at: str
+
+class Organization(BaseModel):
+    id: str
+    name: str
+    slug: str
+    logo_url: Optional[str] = None
+    created_at: str
+    updated_at: str
+
+class OrganizationMember(BaseModel):
+    id: str
+    user_id: str
+    organization_id: str
+    role: UserRole
+    created_at: str
+    updated_at: str
+
+class CreateOrganizationRequest(BaseModel):
+    name: str
+    slug: Optional[str] = None
+
+class UpdateOrganizationRequest(BaseModel):
+    name: Optional[str] = None
+    logo_url: Optional[str] = None
+
+class InviteMemberRequest(BaseModel):
+    email: EmailStr
+    role: UserRole = UserRole.MEMBER
+
+class UpdateMemberRoleRequest(BaseModel):
+    role: UserRole
+
+class UpdateProfileRequest(BaseModel):
+    name: Optional[str] = None
+    avatar_url: Optional[str] = None
 
 class ActionItem(BaseModel):
     task: str
