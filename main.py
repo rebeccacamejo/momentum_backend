@@ -51,7 +51,9 @@ from models.data_models import (
     BrandSettings, GenerateRequest, GenerateResponse,
     MagicLinkRequest, AuthResponse, UserProfile, Organization,
     CreateOrganizationRequest, UpdateOrganizationRequest,
-    InviteMemberRequest, UpdateMemberRoleRequest, UpdateProfileRequest
+    InviteMemberRequest, UpdateMemberRoleRequest, UpdateProfileRequest,
+    ZoomAuthRequest, ZoomAuthResponse, ZoomMeetingsResponse, ZoomMeeting,
+    ZoomMeetingFile, ZoomDownloadRequest, ZoomDownloadResponse
 )
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, Form, Body, status
@@ -61,6 +63,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from utils.deliverables import ALLOWED_IMAGE_MIME_TYPES, save_deliverable, get_deliverable_from_db, call_openai_summary, render_deliverable, render_pdf_bytes_with_playwright, _infer_mime, generate_audio_transcript
 from utils.supabase_client import get_supabase, get_supabase_admin
 from utils.auth import get_current_user, get_optional_user, get_user_organizations, check_organization_access
+from services.zoom_service import ZoomService, ZoomCredentialService, ZoomAPIError
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -761,5 +764,323 @@ async def leave_organization(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Failed to leave organization: {str(e)}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Zoom Integration Routes
+# ---------------------------------------------------------------------------
+
+@app.get("/api/zoom/auth-url")
+async def get_zoom_auth_url(
+    current_user: Dict[str, Any] = Depends(get_current_user)
+) -> Dict[str, str]:
+    """Get Zoom OAuth authorization URL."""
+    try:
+        zoom_service = ZoomService()
+        auth_url = zoom_service.get_authorization_url(state=current_user["id"])
+        return {"auth_url": auth_url}
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to generate auth URL: {str(e)}"
+        )
+
+@app.post("/api/zoom/auth", response_model=ZoomAuthResponse)
+async def handle_zoom_auth_callback(
+    auth_request: ZoomAuthRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+) -> ZoomAuthResponse:
+    """Handle Zoom OAuth callback and store credentials."""
+    try:
+        zoom_service = ZoomService()
+        credential_service = ZoomCredentialService()
+
+        # Exchange code for tokens
+        token_data = await zoom_service.exchange_code_for_tokens(auth_request.code)
+
+        # Get user info from Zoom
+        user_info = await zoom_service.get_user_info(token_data['access_token'])
+
+        # Store credentials
+        success = await credential_service.store_credentials(
+            user_id=current_user["id"],
+            access_token=token_data['access_token'],
+            refresh_token=token_data['refresh_token'],
+            expires_in=token_data['expires_in'],
+            zoom_user_id=user_info.get('id'),
+            zoom_email=user_info.get('email')
+        )
+
+        if not success:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to store Zoom credentials"
+            )
+
+        return ZoomAuthResponse(
+            success=True,
+            message="Zoom account connected successfully",
+            zoom_user_id=user_info.get('id'),
+            zoom_email=user_info.get('email')
+        )
+
+    except ZoomAPIError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Zoom API error: {e.message}"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Authentication failed: {str(e)}"
+        )
+
+@app.get("/api/zoom/meetings", response_model=ZoomMeetingsResponse)
+async def list_zoom_meetings(
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    page_size: int = 30,
+    page_number: int = 1,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+) -> ZoomMeetingsResponse:
+    """List available Zoom recordings."""
+    try:
+        zoom_service = ZoomService()
+        credential_service = ZoomCredentialService()
+
+        # Get valid access token
+        access_token = await credential_service.get_valid_access_token(current_user["id"])
+        if not access_token:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="No valid Zoom credentials found. Please connect your Zoom account."
+            )
+
+        # Parse dates if provided
+        from_datetime = None
+        to_datetime = None
+        if from_date:
+            from_datetime = datetime.fromisoformat(from_date)
+        if to_date:
+            to_datetime = datetime.fromisoformat(to_date)
+
+        # Get recordings from Zoom
+        recordings_data = await zoom_service.list_recordings(
+            access_token=access_token,
+            from_date=from_datetime,
+            to_date=to_datetime,
+            page_size=page_size,
+            page_number=page_number
+        )
+
+        # Transform Zoom API response to our format
+        meetings = []
+        for meeting_data in recordings_data.get('meetings', []):
+            recording_files = []
+            for file_data in meeting_data.get('recording_files', []):
+                if file_data.get('status') == 'completed':  # Only include completed recordings
+                    recording_files.append(ZoomMeetingFile(
+                        id=file_data['id'],
+                        meeting_id=meeting_data['id'],
+                        file_type=file_data.get('file_type', ''),
+                        file_size=file_data.get('file_size', 0),
+                        download_url=file_data.get('download_url', ''),
+                        recording_type=file_data.get('recording_type', '')
+                    ))
+
+            if recording_files:  # Only include meetings with completed recordings
+                meetings.append(ZoomMeeting(
+                    id=meeting_data['id'],
+                    uuid=meeting_data['uuid'],
+                    topic=meeting_data.get('topic', 'Untitled Meeting'),
+                    start_time=meeting_data.get('start_time', ''),
+                    duration=meeting_data.get('duration', 0),
+                    total_size=meeting_data.get('total_size', 0),
+                    recording_count=len(recording_files),
+                    recording_files=recording_files
+                ))
+
+        return ZoomMeetingsResponse(
+            meetings=meetings,
+            page_count=recordings_data.get('page_count', 1),
+            page_number=recordings_data.get('page_number', 1),
+            page_size=recordings_data.get('page_size', page_size),
+            total_records=recordings_data.get('total_records', len(meetings))
+        )
+
+    except ZoomAPIError as e:
+        if e.error_code == "token_expired":
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Zoom credentials expired. Please reconnect your account."
+            )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Zoom API error: {e.message}"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to list meetings: {str(e)}"
+        )
+
+@app.post("/api/zoom/download/{meeting_id}", response_model=ZoomDownloadResponse)
+async def download_and_process_zoom_meeting(
+    meeting_id: str,
+    download_request: ZoomDownloadRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+) -> ZoomDownloadResponse:
+    """Download Zoom meeting recording and optionally process it immediately."""
+    try:
+        zoom_service = ZoomService()
+        credential_service = ZoomCredentialService()
+
+        # Get valid access token
+        access_token = await credential_service.get_valid_access_token(current_user["id"])
+        if not access_token:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="No valid Zoom credentials found. Please connect your Zoom account."
+            )
+
+        # Get meeting recordings
+        meeting_recordings = await zoom_service.get_meeting_recordings(access_token, meeting_id)
+
+        # Find the requested file
+        target_file = None
+        for file_data in meeting_recordings.get('recording_files', []):
+            if file_data['id'] == download_request.file_id:
+                target_file = file_data
+                break
+
+        if not target_file:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Recording file not found"
+            )
+
+        # Download the file
+        file_content = await zoom_service.download_recording_file(
+            access_token,
+            target_file['download_url']
+        )
+
+        if download_request.process_immediately:
+            # Create a file-like object for processing
+            import io
+            file_bytes = io.BytesIO(file_content)
+
+            # Determine client name from meeting topic
+            client_name = meeting_recordings.get('topic', f"Zoom Meeting {meeting_id}")
+
+            # Process the recording (transcribe and generate deliverable)
+            if target_file.get('recording_type') in ['audio_only', 'shared_screen_with_speaker_view']:
+                # Transcribe the audio
+                transcript_text = generate_audio_transcript(file_bytes)
+
+                # Generate deliverable
+                summary_data = call_openai_summary(transcript_text)
+                html = render_deliverable(
+                    client_name=client_name,
+                    data=summary_data,
+                    primary_color="#2A3EB1",
+                    secondary_color="#4C6FE7",
+                    logo_url=None,
+                    template_type="action_plan"
+                )
+
+                # Save deliverable
+                deliverable_id = uuid.uuid4().hex
+                await save_deliverable(
+                    deliverable_id,
+                    client_name,
+                    html,
+                    user_id=current_user["id"]
+                )
+
+                return ZoomDownloadResponse(
+                    success=True,
+                    message=f"Recording downloaded and processed successfully. Deliverable created.",
+                    deliverable_id=deliverable_id
+                )
+            else:
+                return ZoomDownloadResponse(
+                    success=True,
+                    message="Recording downloaded but not processed (unsupported file type for transcription)"
+                )
+        else:
+            return ZoomDownloadResponse(
+                success=True,
+                message="Recording downloaded successfully"
+            )
+
+    except ZoomAPIError as e:
+        if e.error_code == "token_expired":
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Zoom credentials expired. Please reconnect your account."
+            )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Zoom API error: {e.message}"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to download recording: {str(e)}"
+        )
+
+@app.delete("/api/zoom/disconnect")
+async def disconnect_zoom_account(
+    current_user: Dict[str, Any] = Depends(get_current_user)
+) -> Dict[str, str]:
+    """Disconnect Zoom account and delete stored credentials."""
+    try:
+        credential_service = ZoomCredentialService()
+        success = await credential_service.delete_credentials(current_user["id"])
+
+        if success:
+            return {"message": "Zoom account disconnected successfully"}
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to disconnect Zoom account"
+            )
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to disconnect Zoom account: {str(e)}"
+        )
+
+@app.get("/api/zoom/status")
+async def get_zoom_connection_status(
+    current_user: Dict[str, Any] = Depends(get_current_user)
+) -> Dict[str, Any]:
+    """Get current Zoom connection status."""
+    try:
+        credential_service = ZoomCredentialService()
+        credentials = await credential_service.get_credentials(current_user["id"])
+
+        if not credentials:
+            return {
+                "connected": False,
+                "message": "No Zoom account connected"
+            }
+
+        is_expired = await credential_service.is_token_expired(current_user["id"])
+
+        return {
+            "connected": True,
+            "token_expired": is_expired,
+            "zoom_email": credentials.get('zoom_email'),
+            "connected_at": credentials.get('created_at')
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get connection status: {str(e)}"
         )
 
