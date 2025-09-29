@@ -101,7 +101,7 @@ async def generate_deliverable(req: GenerateRequest) -> GenerateResponse:
         template_type=req.template_type,
     )
     deliverable_id = uuid.uuid4().hex
-    await save_deliverable(deliverable_id, req.client_name, html, user_id=None)
+    await save_deliverable(deliverable_id, req.client_name, html, user_id=req.user_id)
     return GenerateResponse(id=deliverable_id, html=html)
 
 
@@ -109,6 +109,7 @@ async def generate_deliverable(req: GenerateRequest) -> GenerateResponse:
 async def upload_recording(
     file: UploadFile = File(...),
     client_name: str = Form(...),
+    user_id: str = Form(...),
     primary_color: str = Form("#2A3EB1"),
     secondary_color: str = Form("#4C6FE7"),
     logo_url: Optional[str] = Form(None),
@@ -147,7 +148,7 @@ async def upload_recording(
         template_type=template_type,
     )
     deliverable_id = uuid.uuid4().hex
-    await save_deliverable(deliverable_id, client_name, html, user_id=None, supa=supa)
+    await save_deliverable(deliverable_id, client_name, html, user_id=user_id, supa=supa)
     return GenerateResponse(id=deliverable_id, html=html)
 
 @app.post("/brand/logo")
@@ -224,22 +225,46 @@ async def update_brand_settings(settings: BrandSettings = Body(...)) -> Dict[str
 
 
 @app.get("/deliverables")
-async def list_deliverables() -> List[Dict[str, Any]]:
-    """Return a list of all deliverables stored in Supabase.
+async def list_deliverables(user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Return a list of deliverables stored in Supabase.
 
-    This endpoint is unauthenticated for the MVP. In a production
-    environment you must restrict this query to the current user via
-    row level security or by filtering by ``user_id``.
+    Filters by user_id if provided. If no user_id is provided, returns an error
+    to ensure data scoping and prevent unauthorized access.
     """
-    response = supa.table("deliverables").select("id, client_name, created_at").order("created_at", desc=True).execute()
+    if not user_id:
+        raise HTTPException(
+            status_code=400,
+            detail="user_id query parameter is required"
+        )
+
+    response = supa.table("deliverables")\
+        .select("id, client_name, created_at")\
+        .eq("user_id", user_id)\
+        .order("created_at", desc=True)\
+        .execute()
+
     data = response.get("data", []) if isinstance(response, dict) else []
     return data
 
 
 @app.get("/deliverables/{deliverable_id}", response_class=HTMLResponse)
-async def get_deliverable(deliverable_id: str) -> HTMLResponse:
-    """Retrieve a single deliverable by ID and return the stored HTML."""
-    response = supa.table("deliverables").select("html").eq("id", deliverable_id).single().execute()
+async def get_deliverable(deliverable_id: str, user_id: Optional[str] = None) -> HTMLResponse:
+    """Retrieve a single deliverable by ID and return the stored HTML.
+
+    Requires user_id to ensure users can only access their own deliverables.
+    """
+    if not user_id:
+        raise HTTPException(
+            status_code=400,
+            detail="user_id query parameter is required"
+        )
+
+    response = supa.table("deliverables")\
+        .select("html")\
+        .eq("id", deliverable_id)\
+        .eq("user_id", user_id)\
+        .single()\
+        .execute()
     record = response.get("data") if isinstance(response, dict) else None
     if not record:
         raise HTTPException(status_code=404, detail="Deliverable not found")
@@ -247,12 +272,27 @@ async def get_deliverable(deliverable_id: str) -> HTMLResponse:
 
 
 @app.get("/deliverables/{id}/pdf")
-async def get_deliverable_pdf(id: str):
+async def get_deliverable_pdf(id: str, user_id: Optional[str] = None):
     """
     Generate (or regenerate) a PDF for a deliverable and return a signed URL.
     Saves the PDF to Supabase Storage in the configured bucket.
+
+    Requires user_id to ensure users can only access their own deliverables.
     """
-    deliverable = get_deliverable_from_db(id)
+    if not user_id:
+        raise HTTPException(
+            status_code=400,
+            detail="user_id query parameter is required"
+        )
+
+    response = supa.table("deliverables")\
+        .select("html")\
+        .eq("id", id)\
+        .eq("user_id", user_id)\
+        .single()\
+        .execute()
+    deliverable = response.get("data") if isinstance(response, dict) else None
+
     if not deliverable:
         raise HTTPException(status_code=404, detail="Deliverable not found")
     html = deliverable.get("html", "")

@@ -76,6 +76,7 @@ class GenerateRequest(BaseModel):
 
     transcript: str = Field(..., description="The raw transcript of the session")
     client_name: str = Field(..., description="Name of the client or session")
+    user_id: str = Field(..., description="ID of the user creating the deliverable")
     template_type: str = Field(
         default="action_plan",
         description="The type of deliverable to generate",

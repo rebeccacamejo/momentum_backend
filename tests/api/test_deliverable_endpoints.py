@@ -30,6 +30,7 @@ def test_generate_deliverable_success(client: TestClient, mock_supabase, mock_op
             json={
                 "transcript": "This is a test transcript",
                 "client_name": "Test Client",
+                "user_id": "test-user-123",
                 "template_type": "action_plan",
                 "primary_color": "#2A3EB1",
                 "secondary_color": "#4C6FE7"
@@ -50,6 +51,7 @@ def test_generate_deliverable_invalid_colors(client: TestClient):
         json={
             "transcript": "This is a test transcript",
             "client_name": "Test Client",
+            "user_id": "test-user-123",
             "template_type": "action_plan",
             "primary_color": "invalid-color",  # Invalid hex color
             "secondary_color": "#4C6FE7"
@@ -85,6 +87,7 @@ def test_upload_recording_success(client: TestClient, mock_supabase, mock_openai
         files = {"file": ("test.wav", sample_audio_file, "audio/wav")}
         data = {
             "client_name": "Test Client",
+            "user_id": "test-user-123",
             "primary_color": "#2A3EB1",
             "secondary_color": "#4C6FE7",
             "template_type": "action_plan"
@@ -205,7 +208,7 @@ def test_list_deliverables_success(client: TestClient, mock_supabase, test_deliv
     mock_response.data = [test_deliverable_data]
     mock_supabase.table.return_value.select.return_value.order.return_value.execute.return_value = mock_response
 
-    response = client.get("/deliverables")
+    response = client.get("/deliverables?user_id=test-user-123")
 
     assert response.status_code == 200
     data = response.json()
@@ -221,7 +224,7 @@ def test_get_deliverable_success(client: TestClient, mock_supabase, test_deliver
     mock_response.data = test_deliverable_data
     mock_supabase.table.return_value.select.return_value.eq.return_value.single.return_value.execute.return_value = mock_response
 
-    response = client.get(f"/deliverables/{test_deliverable_data['id']}")
+    response = client.get(f"/deliverables/{test_deliverable_data['id']}?user_id=test-user-123")
 
     assert response.status_code == 200
     assert test_deliverable_data["html"] in response.text
@@ -234,7 +237,7 @@ def test_get_deliverable_not_found(client: TestClient, mock_supabase):
     mock_response.data = None
     mock_supabase.table.return_value.select.return_value.eq.return_value.single.return_value.execute.return_value = mock_response
 
-    response = client.get("/deliverables/nonexistent-id")
+    response = client.get("/deliverables/nonexistent-id?user_id=test-user-123")
 
     assert response.status_code == 404
     assert "Deliverable not found" in response.json()["detail"]
@@ -243,20 +246,21 @@ def test_get_deliverable_not_found(client: TestClient, mock_supabase):
 @pytest.mark.api
 def test_get_deliverable_pdf_success(client: TestClient, mock_supabase, test_deliverable_data, mock_playwright):
     """Test successful PDF generation."""
-    # Mock get_deliverable_from_db
-    with patch("main.get_deliverable_from_db") as mock_get_deliverable:
-        mock_get_deliverable.return_value = test_deliverable_data
+    # Mock Supabase query
+    mock_response = Mock()
+    mock_response.data = test_deliverable_data
+    mock_supabase.table.return_value.select.return_value.eq.return_value.eq.return_value.single.return_value.execute.return_value = mock_response
 
-        # Mock PDF generation
-        with patch("main.render_pdf_bytes_with_playwright") as mock_pdf:
-            mock_pdf.return_value = b"Mock PDF content"
+    # Mock PDF generation
+    with patch("main.render_pdf_bytes_with_playwright") as mock_pdf:
+        mock_pdf.return_value = b"Mock PDF content"
 
-            mock_supabase.storage.from_.return_value.upload.return_value = {"error": None}
-            mock_supabase.storage.from_.return_value.create_signed_url.return_value = {
-                "signedURL": "http://test.com/signed/deliverable.pdf"
-            }
+        mock_supabase.storage.from_.return_value.upload.return_value = {"error": None}
+        mock_supabase.storage.from_.return_value.create_signed_url.return_value = {
+            "signedURL": "http://test.com/signed/deliverable.pdf"
+        }
 
-            response = client.get(f"/deliverables/{test_deliverable_data['id']}/pdf")
+        response = client.get(f"/deliverables/{test_deliverable_data['id']}/pdf?user_id=test-user-123")
 
     assert response.status_code == 200
     data = response.json()
@@ -265,24 +269,28 @@ def test_get_deliverable_pdf_success(client: TestClient, mock_supabase, test_del
 
 
 @pytest.mark.api
-def test_get_deliverable_pdf_not_found(client: TestClient):
+def test_get_deliverable_pdf_not_found(client: TestClient, mock_supabase):
     """Test PDF generation for non-existent deliverable."""
-    with patch("main.get_deliverable_from_db") as mock_get_deliverable:
-        mock_get_deliverable.return_value = None
+    # Mock Supabase query to return None
+    mock_response = Mock()
+    mock_response.data = None
+    mock_supabase.table.return_value.select.return_value.eq.return_value.eq.return_value.single.return_value.execute.return_value = mock_response
 
-        response = client.get("/deliverables/nonexistent-id/pdf")
+    response = client.get("/deliverables/nonexistent-id/pdf?user_id=test-user-123")
 
     assert response.status_code == 404
     assert "Deliverable not found" in response.json()["detail"]
 
 
 @pytest.mark.api
-def test_get_deliverable_pdf_no_html(client: TestClient):
+def test_get_deliverable_pdf_no_html(client: TestClient, mock_supabase):
     """Test PDF generation for deliverable without HTML."""
-    with patch("main.get_deliverable_from_db") as mock_get_deliverable:
-        mock_get_deliverable.return_value = {"id": "test-id", "html": ""}
+    # Mock Supabase query to return deliverable with no HTML
+    mock_response = Mock()
+    mock_response.data = {"id": "test-id", "html": ""}
+    mock_supabase.table.return_value.select.return_value.eq.return_value.eq.return_value.single.return_value.execute.return_value = mock_response
 
-        response = client.get("/deliverables/test-id/pdf")
+    response = client.get("/deliverables/test-id/pdf?user_id=test-user-123")
 
     assert response.status_code == 422
     assert "Deliverable has no HTML" in response.json()["detail"]
