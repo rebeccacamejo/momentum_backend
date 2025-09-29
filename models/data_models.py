@@ -105,3 +105,51 @@ class BrandSettings(BaseModel):
     primary_color: Optional[str] = "#2A3EB1"
     secondary_color: Optional[str] = "#4C6FE7"
     logo_url: Optional[str] = None
+
+# ---------------------------------------------------------------------------
+# Zoom Integration Models
+# ---------------------------------------------------------------------------
+
+class ZoomAuthRequest(BaseModel):
+    code: str
+    state: Optional[str] = None
+
+class ZoomAuthResponse(BaseModel):
+    success: bool
+    message: str
+    zoom_user_id: Optional[str] = None
+    zoom_email: Optional[str] = None
+
+class ZoomMeetingFile(BaseModel):
+    id: str
+    meeting_id: str
+    file_type: str  # MP4, M4A, etc.
+    file_size: int
+    download_url: str
+    recording_type: str  # shared_screen_with_speaker_view, audio_only, etc.
+
+class ZoomMeeting(BaseModel):
+    id: str
+    uuid: str
+    topic: str
+    start_time: str
+    duration: int  # in minutes
+    total_size: int  # total size of all recordings
+    recording_count: int
+    recording_files: List[ZoomMeetingFile]
+
+class ZoomMeetingsResponse(BaseModel):
+    meetings: List[ZoomMeeting]
+    page_count: int
+    page_number: int
+    page_size: int
+    total_records: int
+
+class ZoomDownloadRequest(BaseModel):
+    file_id: str
+    process_immediately: bool = True
+
+class ZoomDownloadResponse(BaseModel):
+    success: bool
+    message: str
+    deliverable_id: Optional[str] = None
